@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"io"
 	"net/url"
 	"os"
 
@@ -12,8 +13,10 @@ import (
 	"github.com/pkg/errors"
 	"google.golang.org/protobuf/encoding/protojson"
 	"k8s.io/klog"
-	"oras.land/oras-go/pkg/content"
-	"oras.land/oras-go/pkg/oras"
+	"oras.land/oras-go/v2"
+	"oras.land/oras-go/v2/content"
+	"oras.land/oras-go/v2/content/file"
+	"oras.land/oras-go/v2/registry/remote"
 )
 
 // ociIndexerOpts are the options to configure the ociIndexer
@@ -68,8 +71,8 @@ func WithHost(h string) OciIndexerOpt {
 
 // ociIndexer is an OCI-based Indexer
 type ociIndexer struct {
-	reference string
-	resolver  remotes.Resolver
+	reference  string
+	repository *remote.Repository
 }
 
 // NewOciIndexer returns a new OCI-based indexer
@@ -83,11 +86,15 @@ func NewOciIndexer(opts ...OciIndexerOpt) (Indexer, error) {
 	if err != nil {
 		return nil, errors.Wrapf(ErrInvalidArgument, "invalid OCI host URL: %+v", err)
 	}
-	resolver := newDockerResolver(u, opt.username, opt.password, opt.insecure)
+
+	repository, err := newRemoteRepository(u, opt.username, opt.password, opt.insecure)
+	if err != nil {
+		return nil, err
+	}
 
 	ind := &ociIndexer{
-		reference: opt.reference,
-		resolver:  resolver,
+		reference:  opt.reference,
+		repository: repository,
 	}
 
 	return ind, nil
@@ -138,7 +145,10 @@ func (ind *ociIndexer) Get(ctx context.Context) (idx *api.Index, e error) {
 
 func (ind *ociIndexer) downloadIndex(ctx context.Context, rootPath string) (f string, e error) {
 	// Pull index files from remote
-	store := content.NewFile(rootPath)
+	store, err := file.New(rootPath)
+	if err != nil {
+		return "", errors.Wrapf(err, "unable to create file store")
+	}
 	defer func() {
 		err := store.Close()
 		// This library is buggy, and we need to check the error string too
@@ -156,20 +166,28 @@ func (ind *ociIndexer) downloadIndex(ctx context.Context, rootPath string) (f st
 
 	// Infer index filename from layer annotations
 	var indexFilename string
-	opts := []oras.CopyOpt{
-		oras.WithAllowedMediaType(chartsIndexLayerMediaType, chartsIndexConfigMediaType),
-		// The index artifact has no title
-		oras.WithPullEmptyNameAllowed(),
-		oras.WithLayerDescriptors(func(layers []ocispec.Descriptor) {
-			for _, layer := range layers {
-				switch layer.MediaType {
-				case chartsIndexLayerMediaType:
-					indexFilename = layer.Annotations["org.opencontainers.image.title"]
+	opts := oras.DefaultCopyOptions
+	opts.FindSuccessors = func(ctx context.Context, fetcher content.Fetcher, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
+		successors, err := content.Successors(ctx, fetcher, desc)
+		if err != nil {
+			return nil, err
+		}
+		var filtered []ocispec.Descriptor
+		for _, s := range successors {
+			// filter media type
+			if s.MediaType == chartsIndexLayerMediaType || s.MediaType == chartsIndexConfigMediaType {
+				filtered = append(filtered, s)
+			}
+			// set indexFilename
+			if s.MediaType == chartsIndexLayerMediaType {
+				if title, ok := s.Annotations["org.opencontainers.image.title"]; ok {
+					indexFilename = title
 				}
 			}
-		}),
+		}
+		return filtered, nil
 	}
-	_, err := oras.Copy(ctx, ind.resolver, ind.reference, store, ind.reference, opts...)
+	indexDesc, err := oras.Copy(ctx, ind.repository, ind.reference, store, ind.reference, opts)
 	if err != nil {
 		if containerderrs.IsNotFound(err) {
 			return "", errors.Wrap(ErrNotFound, err.Error())
@@ -177,11 +195,30 @@ func (ind *ociIndexer) downloadIndex(ctx context.Context, rootPath string) (f st
 		return "", err
 	}
 
+	klog.V(5).Infof("Using index desc %v", indexDesc)
+
 	// Fallback to the default index filename if the layers don't specify it
 	if indexFilename == "" {
 		klog.Infof("Unable to find index filename: using default")
 		indexFilename = defaultIndexFilename
 	}
 
-	return store.ResolvePath(indexFilename), nil
+	reader, err := store.Fetch(ctx, indexDesc)
+	if err != nil {
+		return "", errors.Wrapf(err, "unable to fetch index")
+	}
+	defer reader.Close()
+
+	indexFile, err := os.Create(indexFilename)
+	if err != nil {
+		return "", err
+	}
+	defer indexFile.Close()
+
+	_, err = io.Copy(indexFile, reader)
+	if err != nil {
+		return "", err
+	}
+
+	return indexFile.Name(), nil
 }
