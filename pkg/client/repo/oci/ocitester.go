@@ -95,7 +95,7 @@ func PushChartToOCI(file string, metadata *chart.Metadata, ref string) error {
 		Digest:    ocidigest.FromBytes(configBytes),
 		Size:      int64(len(configBytes)),
 	}
-	if err := memoryStore.Push(ctx, configDesc, bytes.NewReader(configBytes)); err != nil {
+	if err = memoryStore.Push(ctx, configDesc, bytes.NewReader(configBytes)); err != nil {
 		return errors.Trace(err)
 	}
 

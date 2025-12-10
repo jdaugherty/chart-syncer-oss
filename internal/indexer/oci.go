@@ -150,7 +150,7 @@ func (ind *ociIndexer) downloadIndex(ctx context.Context, rootPath string) (f st
 		return "", errors.Wrapf(err, "unable to create file store")
 	}
 	defer func() {
-		err := store.Close()
+		err = store.Close()
 		// This library is buggy, and we need to check the error string too
 		// https://github.com/oras-project/oras-go/issues/84
 		if e == nil && err != nil && err.Error() != "" {
@@ -168,7 +168,8 @@ func (ind *ociIndexer) downloadIndex(ctx context.Context, rootPath string) (f st
 	var indexFilename string
 	opts := oras.DefaultCopyOptions
 	opts.FindSuccessors = func(ctx context.Context, fetcher content.Fetcher, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
-		successors, err := content.Successors(ctx, fetcher, desc)
+		var successors []ocispec.Descriptor
+		successors, err = content.Successors(ctx, fetcher, desc)
 		if err != nil {
 			return nil, err
 		}
