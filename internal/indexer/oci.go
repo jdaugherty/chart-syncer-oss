@@ -3,12 +3,11 @@ package indexer
 import (
 	"context"
 	"io"
-	"net/url"
 	"os"
 
 	"github.com/bitnami/charts-syncer/internal/indexer/api"
-	containerderrs "github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/remotes"
+	"github.com/distribution/reference"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -16,13 +15,13 @@ import (
 	"oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content"
 	"oras.land/oras-go/v2/content/file"
+	oraserr "oras.land/oras-go/v2/errdef"
 	"oras.land/oras-go/v2/registry/remote"
 )
 
 // ociIndexerOpts are the options to configure the ociIndexer
 type ociIndexerOpts struct {
 	reference string
-	url       string
 	username  string
 	password  string
 	insecure  bool
@@ -60,15 +59,6 @@ func WithInsecure() OciIndexerOpt {
 	}
 }
 
-// WithHost configures the OCI host
-//
-//	opt := WithHost("my.oci.domain")
-func WithHost(h string) OciIndexerOpt {
-	return func(opts *ociIndexerOpts) {
-		opts.url = h
-	}
-}
-
 // ociIndexer is an OCI-based Indexer
 type ociIndexer struct {
 	reference  string
@@ -82,12 +72,12 @@ func NewOciIndexer(opts ...OciIndexerOpt) (Indexer, error) {
 		o(opt)
 	}
 
-	u, err := url.Parse(opt.url)
+	named, err := reference.ParseNormalizedNamed(opt.reference)
 	if err != nil {
-		return nil, errors.Wrapf(ErrInvalidArgument, "invalid OCI host URL: %+v", err)
+		return nil, err
 	}
 
-	repository, err := newRemoteRepository(u, opt.username, opt.password, opt.insecure)
+	repository, err := newRemoteRepository(named.Name(), opt.username, opt.password, opt.insecure)
 	if err != nil {
 		return nil, err
 	}
@@ -190,13 +180,11 @@ func (ind *ociIndexer) downloadIndex(ctx context.Context, rootPath string) (f st
 	}
 	indexDesc, err := oras.Copy(ctx, ind.repository, ind.reference, store, ind.reference, opts)
 	if err != nil {
-		if containerderrs.IsNotFound(err) {
+		if errors.Is(err, oraserr.ErrNotFound) {
 			return "", errors.Wrap(ErrNotFound, err.Error())
 		}
 		return "", err
 	}
-
-	klog.V(5).Infof("Using index desc %v", indexDesc)
 
 	// Fallback to the default index filename if the layers don't specify it
 	if indexFilename == "" {

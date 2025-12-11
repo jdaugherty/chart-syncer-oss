@@ -63,7 +63,7 @@ type Tags struct {
 // New creates a Repo object from an apiv1.Repo object.
 func New(repo *apiv1.Repo, c cache.Cacher, insecure bool, usePlainHTTP bool) (*Repo, error) {
 	// Init entries
-	entries, err := populateEntries(repo)
+	entries, err := populateEntries(repo, usePlainHTTP)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -359,17 +359,20 @@ func (r *Repo) parseReference(u url.URL, version string) (name.Reference, error)
 }
 
 // populateEntries populates the entries map with the info from the charts index
-func populateEntries(repo *apiv1.Repo) (map[string][]string, error) {
+func populateEntries(repo *apiv1.Repo, usePlainHTTP bool) (map[string][]string, error) {
 	if repo.GetDisableChartsIndex() {
 		return make(map[string][]string), nil
 	}
 
 	klog.Infof("Attempting to retrieve remote index...")
-	ind, err := indexer.NewOciIndexer(
-		indexer.WithHost(repo.GetUrl()),
+	indexerOpts := []indexer.OciIndexerOpt{
 		indexer.WithBasicAuth(repo.GetAuth().GetUsername(), repo.GetAuth().GetPassword()),
 		indexer.WithIndexRef(repo.GetChartsIndex()),
-	)
+	}
+	if usePlainHTTP {
+		indexerOpts = append(indexerOpts, indexer.WithInsecure())
+	}
+	ind, err := indexer.NewOciIndexer(indexerOpts...)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
